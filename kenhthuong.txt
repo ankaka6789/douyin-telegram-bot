@@ -1,0 +1,5 @@
+# Mỗi dòng một sec_uid. Có thể thêm tên ghi nhớ sau dấu |.
+# Nếu một sec_uid có trong cả hai file, bot chỉ quét theo nhóm ưu tiên.
+# Ví dụ:
+# MS4wLjABAAAAyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy | Tên kênh B
+

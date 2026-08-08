@@ -1,0 +1,21 @@
+# ================= CẤU HÌNH BẮT BUỘC =================
+# Không đưa token thật lên GitHub công khai.
+TIKHUB_API_TOKEN=DIEN_TOKEN_TIKHUB_VAO_DAY
+TELEGRAM_BOT_TOKEN=DIEN_TOKEN_BOT_TELEGRAM_VAO_DAY
+TELEGRAM_CHAT_ID=DIEN_CHAT_ID_VAO_DAY
+
+# ================= LỊCH QUÉT =================
+CHU_KY_UU_TIEN_PHUT=30
+CHU_KY_THUONG_PHUT=60
+SO_VIDEO_QUET=4
+
+# false: lần đầu chỉ ghi nhận video hiện tại, không báo video cũ.
+# true: lần đầu chạy cũng gửi video mới nhất để thử bot.
+THONG_BAO_LAN_DAU=false
+
+# ================= TÙY CHỌN =================
+MUI_GIO=Asia/Ho_Chi_Minh
+TIMEOUT_GIAY=30
+NGHI_GIUA_CAC_KENH_GIAY=0.35
+TIKHUB_API_URL=https://api.tikhub.io/api/v1/douyin/app/v3/fetch_user_post_videos
+STATE_FILE=data/trangthai.json

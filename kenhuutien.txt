@@ -1,0 +1,4 @@
+# Mỗi dòng một sec_uid. Có thể thêm tên ghi nhớ sau dấu |.
+# Ví dụ:
+# MS4wLjABAAAAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | Tên kênh A
+
