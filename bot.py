@@ -52,11 +52,23 @@ class Config:
     request_timeout_seconds: int = 30
     channel_delay_seconds: float = 0.35
     notify_on_first_run: bool = False
+    scan_start_minutes: int = 0
+    scan_end_minutes: int = 0
+    activity_report_interval_hours: int = 0
     api_url: str = DEFAULT_API_URL
 
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone_name)
+
+    @property
+    def scan_window_label(self) -> str:
+        if self.scan_start_minutes == self.scan_end_minutes:
+            return "Cả ngày"
+        return (
+            f"{_format_clock_minutes(self.scan_start_minutes)}-"
+            f"{_format_clock_minutes(self.scan_end_minutes)}"
+        )
 
 
 @dataclass(frozen=True)
@@ -152,6 +164,37 @@ def _as_float(value: str, key: str, minimum: float, maximum: float) -> float:
     return parsed
 
 
+def _parse_clock_minutes(value: str, key: str) -> int:
+    parts = value.strip().split(":")
+    if len(parts) != 2 or not all(part.isdigit() for part in parts):
+        raise BotError(f"{key} phải có dạng HH:MM, ví dụ 07:30")
+    hour, minute = (int(part) for part in parts)
+    if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+        raise BotError(f"{key} không phải giờ hợp lệ: {value}")
+    return hour * 60 + minute
+
+
+def _format_clock_minutes(value: int) -> str:
+    hour, minute = divmod(value, 60)
+    return f"{hour:02d}:{minute:02d}"
+
+
+def is_inside_scan_window(
+    local_now: datetime, start_minutes: int, end_minutes: int
+) -> bool:
+    """Khoảng bắt đầu có hiệu lực, khoảng kết thúc không còn hiệu lực.
+
+    Hai mốc bằng nhau nghĩa là quét cả ngày. Khoảng qua nửa đêm cũng được hỗ trợ,
+    ví dụ 22:00-06:00.
+    """
+    if start_minutes == end_minutes:
+        return True
+    current_minutes = local_now.hour * 60 + local_now.minute
+    if start_minutes < end_minutes:
+        return start_minutes <= current_minutes < end_minutes
+    return current_minutes >= start_minutes or current_minutes < end_minutes
+
+
 def _looks_like_placeholder(value: str) -> bool:
     upper = value.strip().upper()
     return not value.strip() or upper.startswith(("DIEN_", "YOUR_", "THAY_"))
@@ -226,6 +269,22 @@ def load_config() -> Config:
         notify_on_first_run=_as_bool(
             _env_or_file(values, "THONG_BAO_LAN_DAU", default="false"),
             "THONG_BAO_LAN_DAU",
+        ),
+        scan_start_minutes=_parse_clock_minutes(
+            _env_or_file(values, "GIO_BAT_DAU_QUET", default="00:00"),
+            "GIO_BAT_DAU_QUET",
+        ),
+        scan_end_minutes=_parse_clock_minutes(
+            _env_or_file(values, "GIO_KET_THUC_QUET", default="00:00"),
+            "GIO_KET_THUC_QUET",
+        ),
+        activity_report_interval_hours=_as_int(
+            _env_or_file(
+                values, "THONG_BAO_HOAT_DONG_MOI_GIO", default="0"
+            ),
+            "THONG_BAO_HOAT_DONG_MOI_GIO",
+            0,
+            720,
         ),
         api_url=_env_or_file(values, "TIKHUB_API_URL", default=DEFAULT_API_URL),
     )
@@ -448,6 +507,46 @@ class TelegramClient:
             },
         )
 
+    def send_activity_report(self, status: dict[str, Any]) -> None:
+        local_now = datetime.now(self.config.tz).strftime("%d/%m/%Y %H:%M:%S")
+        scan_state = (
+            "Đang trong khung giờ quét"
+            if status.get("inside_scan_window")
+            else "Đang nghỉ ngoài khung giờ quét"
+        )
+        last_check_value = status.get("last_check")
+        last_check = "Chưa có"
+        if last_check_value:
+            try:
+                last_check = (
+                    datetime.fromisoformat(str(last_check_value))
+                    .astimezone(self.config.tz)
+                    .strftime("%d/%m/%Y %H:%M:%S")
+                )
+            except ValueError:
+                last_check = str(last_check_value)
+        text = (
+            "✅ <b>Bot Douyin vẫn hoạt động bình thường</b>\n\n"
+            f"🕒 <b>Thời gian:</b> {html.escape(local_now)}\n"
+            f"⏰ <b>Khung quét:</b> {html.escape(self.config.scan_window_label)}\n"
+            f"📡 <b>Hiện tại:</b> {html.escape(scan_state)}\n"
+            f"⭐ <b>Kênh ưu tiên:</b> {int(status.get('priority_channels', 0))}\n"
+            f"📁 <b>Kênh thường:</b> {int(status.get('normal_channels', 0))}\n"
+            f"🔄 <b>Lượt gọi TikHub:</b> {int(status.get('api_calls', 0))}\n"
+            f"⚠️ <b>Số lỗi:</b> {int(status.get('errors', 0))}\n"
+            f"🧭 <b>Lần quét gần nhất:</b> {html.escape(str(last_check))}"
+        )
+        self._post(
+            "sendMessage",
+            {
+                "chat_id": self.config.telegram_chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "disable_notification": False,
+            },
+        )
+
     def send_video_alert(self, video: Video, group_name: str) -> None:
         local_time = (
             datetime.fromtimestamp(video.create_time, tz=timezone.utc)
@@ -611,7 +710,12 @@ class BotRuntime:
             "normal_channels": 0,
             "api_calls": 0,
             "notifications": 0,
+            "activity_reports": 0,
+            "last_activity_report": None,
             "errors": 0,
+            "scan_window": None,
+            "inside_scan_window": None,
+            "activity_report_interval_hours": 0,
         }
 
     def start(self) -> None:
@@ -650,6 +754,13 @@ class BotRuntime:
             last_error=None,
             priority_channels=len(priority),
             normal_channels=len(normal),
+            scan_window=config.scan_window_label,
+            inside_scan_window=is_inside_scan_window(
+                datetime.now(config.tz),
+                config.scan_start_minutes,
+                config.scan_end_minutes,
+            ),
+            activity_report_interval_hours=config.activity_report_interval_hours,
         )
         logger.info(
             "Bot sẵn sàng: %d kênh ưu tiên (%d phút), %d kênh thường (%d phút)",
@@ -658,21 +769,75 @@ class BotRuntime:
             len(normal),
             config.normal_interval_minutes,
         )
+        logger.info(
+            "Khung giờ quét: %s (%s); thông báo hoạt động: %s",
+            config.scan_window_label,
+            config.timezone_name,
+            (
+                f"mỗi {config.activity_report_interval_hours} giờ"
+                if config.activity_report_interval_hours
+                else "tắt"
+            ),
+        )
 
         state = StateStore(config.state_file)
         session = requests.Session()
+        telegram = TelegramClient(config, session)
         monitor = MonitorService(
             config,
             state,
             TikHubClient(config, session),
-            TelegramClient(config, session),
+            telegram,
         )
         next_priority = 0.0
         next_normal = 0.0
+        next_activity_report = (
+            time.monotonic() + config.activity_report_interval_hours * 3600
+            if config.activity_report_interval_hours
+            else float("inf")
+        )
+        outside_window_logged = False
 
         try:
             while not self.stop_event.is_set():
                 now = time.monotonic()
+                inside_window = is_inside_scan_window(
+                    datetime.now(config.tz),
+                    config.scan_start_minutes,
+                    config.scan_end_minutes,
+                )
+                self._update(inside_scan_window=inside_window)
+
+                if now >= next_activity_report:
+                    self._send_activity_report(telegram)
+                    next_activity_report = (
+                        time.monotonic()
+                        + config.activity_report_interval_hours * 3600
+                    )
+                    now = time.monotonic()
+
+                if not inside_window:
+                    if not outside_window_logged:
+                        logger.info(
+                            "Ngoài khung giờ %s: tạm dừng quét TikHub",
+                            config.scan_window_label,
+                        )
+                        outside_window_logged = True
+                    # Đặt lại để khi bước vào khung giờ, cả hai nhóm được quét ngay.
+                    next_priority = 0.0
+                    next_normal = 0.0
+                    report_wait = next_activity_report - time.monotonic()
+                    wait_seconds = max(1.0, min(30.0, report_wait))
+                    self.stop_event.wait(wait_seconds)
+                    continue
+
+                if outside_window_logged:
+                    logger.info(
+                        "Đã vào khung giờ %s: tiếp tục quét TikHub",
+                        config.scan_window_label,
+                    )
+                    outside_window_logged = False
+
                 if now >= next_priority:
                     priority, normal = load_channel_groups(config.config_dir)
                     self._update(
@@ -696,11 +861,32 @@ class BotRuntime:
 
                 wait_seconds = max(
                     1.0,
-                    min(30.0, next_priority - time.monotonic(), next_normal - time.monotonic()),
+                    min(
+                        30.0,
+                        next_priority - time.monotonic(),
+                        next_normal - time.monotonic(),
+                        next_activity_report - time.monotonic(),
+                    ),
                 )
                 self.stop_event.wait(wait_seconds)
         finally:
             session.close()
+
+    def _send_activity_report(self, telegram: TelegramClient) -> None:
+        try:
+            telegram.send_activity_report(self.snapshot())
+            sent_at = datetime.now(timezone.utc).isoformat()
+            self._update(
+                activity_reports=self.snapshot()["activity_reports"] + 1,
+                last_activity_report=sent_at,
+            )
+            logger.info("Đã gửi thông báo bot vẫn hoạt động")
+        except BotError as exc:
+            self._update(
+                errors=self.snapshot()["errors"] + 1,
+                last_error=f"Thông báo hoạt động: {exc}",
+            )
+            logger.error("Không gửi được thông báo hoạt động: %s", exc)
 
     def _check_group(
         self,
